@@ -4,6 +4,7 @@
 # SPDX-License-Identifier: BSD-2-Clause-Patent
 ##
 import logging
+import uuid
 from edk2toolext.environment.plugintypes.ci_build_plugin import ICiBuildPlugin
 from edk2toollib.uefi.edk2.guid_list import GuidList
 from edk2toolext.environment.var_dict import VarDict
@@ -100,6 +101,20 @@ class GuidCheck(ICiBuildPlugin):
                     errors.remove(e)
 
         return errors
+
+    def _PatchInfGuidInPlace(self, filename: str, old_guid: str) -> str:
+        """ Generate a new FILE_GUID and patch in-place.
+        Return the new GUID.
+        """
+        new_guid = str(uuid.uuid4()).upper()
+        with open(filename, "r+", newline="") as inf_file:
+            inf_contents = inf_file.read()
+            if (key_location := inf_contents.find("FILE_GUID")) != -1:
+                if (guid_location := inf_contents.find(old_guid, key_location)) != -1:
+                    inf_file.seek(guid_location)
+                    inf_file.write(new_guid)
+                    return new_guid
+            return None
 
     ##
     # External function of plugin.  This function is used to perform the task of the MuBuild Plugin
@@ -209,19 +224,33 @@ class GuidCheck(ICiBuildPlugin):
             InMyPackage = False
             for a in er.entries:
                 if abs_pkg_path in a.absfilepath:
+                    filename = a.absfilepath
+                    old_guid = a.guid
                     InMyPackage = True
                     break
             if(not InMyPackage):
                 Errors.remove(er)
             else:
-                logging.error(str(er))
-                tc.LogStdError(str(er))
+                if environment.GetValue("PATCH_GUIDS") == "TRUE" and er.type == "guid" and filename.lower().endswith(".inf"):
+                    new_guid = self._PatchInfGuidInPlace(filename, old_guid)
+                    if new_guid:
+                        tc.LogStdOut("Patching {0} with {1}".format(filename, new_guid))
+                        logging.info("Patching {0} with {1}".format(filename, new_guid))
+                    else:
+                        logging.error(str(er))
+                        tc.LogStdError(str(er))
+                else:
+                    logging.error(str(er))
+                    tc.LogStdError(str(er))
 
         # add result to test case
         overall_status = len(Errors)
         if overall_status != 0:
             tc.SetFailed("GuidCheck {0} Failed.  Errors {1}".format(
                 packagename, overall_status), "CHECK_FAILED")
+            if environment.GetValue("PATCH_GUIDS") != "TRUE":
+                logging.error("Run locally with `PATCH_GUIDS=TRUE` to generate new INF FILE_GUID values")
+                tc.LogStdError("Run locally with `PATCH_GUIDS=TRUE` to generate new INF FILE_GUID values")
         else:
             tc.SetSuccess()
         return overall_status
